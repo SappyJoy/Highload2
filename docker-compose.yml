@@ -1,0 +1,341 @@
+version: '3.8'
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./volumes/portainer-data:/data
+    ports:
+      - "9000:9000"
+  elasticsearch:
+    image: elasticsearch:7.17.8
+    container_name: elasticsearch
+    ports:
+      - "9200:9200"
+    environment:
+      - "discovery.type=single-node"
+    volumes:
+      - ./volumes/elasticsearch/data:/usr/share/elasticsearch/data:rw              # Persistence data
+  logstash:
+    image: logstash:7.17.8
+    container_name: logstash
+    ports:
+      - "25826:25826"
+      - "5044:5044"
+    volumes:
+      - ./monitoring/logstash/pipeline:/usr/share/logstash/pipeline:ro                # Pipeline configuration
+    restart: on-failure
+    depends_on:
+      - elasticsearch
+
+  kibana:
+    image: kibana:7.17.8
+    container_name: kibana
+    ports:
+      - "5601:5601"
+    restart: on-failure
+    depends_on:
+      - elasticsearch
+
+  filebeat:
+    container_name: filebeat
+    image: elastic/filebeat:7.17.8
+    entrypoint: "filebeat -e -strict.perms=false"
+    volumes:
+      - ./monitoring/filebeat/filebeat.docker.yml:/usr/share/filebeat/filebeat.yml # Configuration file
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro           # Docker logs
+      - /var/run/docker.sock:/var/run/docker.sock:ro                       # Additional information about containers
+      - ./volumes/filebeat/data:/usr/share/filebeat/data:rw                        # Persistence data
+    user: root # Allow access to log files and docker.sock
+    restart: on-failure
+    depends_on:
+      - logstash
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+  grafana:
+    image: grafana/grafana
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./monitoring/grafana.env
+    volumes:
+      - "./volumes/grafana:/grafana"
+  postgres_zabbix: # The Postgres Database Service
+    image: postgres:latest
+    restart: always
+    environment: # Username, password and database name variables
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix
+      POSTGRES_DB: zabbix
+      PG_DATA: /var/lib/postgresql/data/pgdata #data storage
+  zabbix-server: # The main Zabbix Server Software Service
+    image: zabbix/zabbix-server-pgsql:ubuntu-latest
+    restart: always
+    environment: # The Postgres database value variable
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix
+      POSTGRES_DB: zabbixNew
+      ZBX_HISTORYSTORAGETYPES: log,text #Zabbix configuration variables
+      ZBX_DEBUGLEVEL: 1
+      ZBX_HOUSEKEEPINGFREQUENCY: 1
+      ZBX_MAXHOUSEKEEPERDELETE: 5000
+    depends_on:
+      - postgres_zabbix
+  zabbix-web: # The main Zabbix web UI or interface
+    image: zabbix/zabbix-web-nginx-pgsql:ubuntu-latest
+    restart: always
+    environment: # Postgre database variables
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix
+      POSTGRES_DB: zabbixNew
+      ZBX_SERVER_HOST: zabbix-server  # Zabbix related and Php variables
+      ZBX_POSTMAXSIZE: 64M
+      PHP_TZ: "Asia/Kolkata"
+      ZBX_MAXEXECUTIONTIME: 500
+    depends_on:
+      - postgres_zabbix
+      - zabbix-server
+    ports: # Port where Zabbix UI is available
+      - "8100:80"
+  zabbix-agent: # Zabbix agent service that tracks usage and send to zabbix server
+    image: zabbix/zabbix-agent:latest
+    privileged: true   #access mode for allowing resource access
+    network_mode: "host"
+    restart: unless-stopped
+    environment:
+      - ZBX_SERVER_HOST="zabbix-server" #the IP/Dns of Zabbix server
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.46.0
+    container_name: cadvisor
+    ports:
+      - "8090:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+  postgres_users:
+    image: postgres:14.5-alpine
+    environment:
+      POSTGRES_DB: users_service
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - "./volumes/postgres:/var/lib/postgresql/data"
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+  postgres_auth:
+    image: postgres:14.5-alpine
+    environment:
+      POSTGRES_DB: auth_service
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+    volumes:
+      - "./volumes/postgres_auth:/var/lib/postgresql/data"
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+  postgres_core:
+    image: postgres:14.5-alpine
+    environment:
+      POSTGRES_DB: core_service
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+    volumes:
+      - "./volumes/postgres_core:/var/lib/postgresql/data"
+    ports:
+      - "5435:5432"
+    restart: unless-stopped
+  shared_lib:
+    container_name: shared_lib
+    image: shared_lib
+    build: ./shared
+  eureka-server:
+    container_name: eureka-server
+    image: eurekaserviceimage
+    build: ./eureka-server
+    ports:
+      - "8761:8761"
+  config-service:
+    image: configserviceimage
+    container_name: config-server
+    build: ./config-server
+    ports:
+      - "8765:8765"
+    environment:
+      PORT: 8765
+      EUREKA_ADDRESS: "eureka-server:8761"
+    depends_on:
+      - eureka-server
+  eureka-client:
+      image: eurekaclientimage
+      container_name: eureka-client
+      build: ./eureka-client
+      ports:
+        - "8081:8081"
+      environment:
+        PORT: 8081
+        EUREKA_ADDRESS: "eureka-server:8761"
+        CONFIG_URL: "config-service:8765"
+        POSTGRES_ADDRESS: "postgres_users:5432"
+      deploy:
+        restart_policy:
+          condition: on-failure
+          max_attempts: 3
+          delay: 3s
+      depends_on:
+        - config-service
+        - postgres_users
+##  user-service:
+##    image: userserviceimage
+##    container_name: user-service
+##    build: ./user-service
+##    ports:
+##      - "8081:8081"
+##    environment:
+##      PORT: 8081
+##      EUREKA_ADDRESS: "eureka-server:8671"
+##      CONFIG_URL: "config-service:8762"
+##      POSTGRES_ADDRESS: "postgres_users:5432"
+##    deploy:
+##      restart_policy:
+##        condition: on-failure
+##        max_attempts: 3
+##        delay: 3s
+##    depends_on:
+##      - config-service
+##      - postgres_users
+##  auth-service:
+##    image: authserviceimage
+##    container_name: auth-service
+##    build: ./auth-service
+##    ports:
+##      - "8082:8082"
+##    volumes:
+##      - "./volumes/dependencies/:/root/.m2/"
+##    environment:
+##      PORT: 8082
+##      EUREKA_ADDRESS: "eureka-server:8671"
+##      CONFIG_URL: "config-service:8762"
+##      POSTGRES_HOST: "postgres_auth"
+##      POSTGRES_PORT: "5433"
+##      POSTGRES_DATABASE: "auth_service"
+##      USER_SERVICE_CONTEXT_PATH: "/api/user"
+##      USER_SERVICE_APP_NAME: "user-service"
+##    deploy:
+##      restart_policy:
+##        condition: on-failure
+##        max_attempts: 5
+##        delay: 3s
+##    depends_on:
+##      - postgres_users
+##      - user-service
+##      - config-service
+##      - shared_lib
+##  medication-service:
+##    image: medicationserviceimage
+##    container_name: medication-service
+##    build: ./medication-service
+##    ports:
+##      - "8084:8084"
+##    environment:
+##      PORT: 8084
+##      CONFIG_URL: "config-service:8762"
+##      EUREKA_ADDRESS: "eureka-server:8671"
+##      POSTGRES_ADDRESS: "postgres_medication:5432"
+##    deploy:
+##      restart_policy:
+##        condition: on-failure
+##        max_attempts: 5
+##        delay: 3s
+##    depends_on:
+##      - postgres_medication
+##      - config-service
+##      - eureka-server
+##      - shared_lib
+##  core-service:
+##    image: coreserviceimage
+##    container_name: core-service
+##    build: ./core-service
+##    ports:
+##      - "8086:8086"
+##    environment:
+##      PORT: 8086
+##      CONFIG_URL: "config-service:8762"
+##      EUREKA_ADDRESS: "eureka-server:8671"
+##      POSTGRES_ADDRESS: "postgres_core:5432"
+##    deploy:
+##      restart_policy:
+##        condition: on-failure
+##        max_attempts: 5
+##        delay: 3s
+##    depends_on:
+##      - postgres_core
+##      - config-service
+##      - eureka-server
+##      - shared_lib
+##  facade:
+##    image: facadeimage
+##    build: ./facade
+##    container_name: facade
+##    environment:
+##      PORT: 8085
+##      MEDICATION_SERVICE_APP_NAME: "medication-service"
+##      MEDICATION_SERVICE_CONTEXT_PATH: "/api/medications"
+##      CORE_SERVICE_URL: "core-service:8086"
+##      ORDER_SERVICE_CONTEXT_PATH: "/api/order"
+##      STORAGE_SERVICE_CONTEXT_PATH: "/api/storage"
+##      CONFIG_URL: "config-service:8762"
+##      EUREKA_ADDRESS: "eureka-server:8671"
+##    labels:
+##      collect_logs_with_filebeat: "true"
+##      decode_log_event_to_json_object: "true"
+##    ports:
+##      - "8085:8085"
+##    deploy:
+##      restart_policy:
+##        condition: on-failure
+##        max_attempts: 5
+##        delay: 3s
+##    depends_on:
+##      - medication-service
+##      - config-service
+##      - eureka-server
+##      - shared_lib
+  gateway:
+    image: gateway
+    container_name: gateway
+    build: ./api-gateway
+    ports:
+      - "8083:8083"
+    environment:
+      PORT: 8083
+#      AUTH_SERVICE_ADDRESS: "auth-service:8082"
+#      FACADE_SERVICE_ADDRESS: "facade:8085"
+      CONFIG_URL: "config-service:8765"
+      EUREKA_ADDRESS: "eureka-server:8761"
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 5
+        delay: 3s
+    labels:
+      collect_logs_with_filebeat: "true"
+      decode_log_event_to_json_object: "true"
+    depends_on:
+#      - auth-service
+      - config-service
+#      - facade
